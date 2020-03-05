@@ -17,11 +17,12 @@ import json
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-
 tfk = tf.keras
 tfkl = tf.keras.layers
 tfpl = tfp.layers
 tfd = tfp.distributions
+tfkv= tfk.utils
+
 
 
 '''
@@ -58,34 +59,88 @@ prior = tfd.Independent(tfd.Normal(loc=tf.zeros(encoded_size), scale=1),
 '''
 Encoder network
 '''
-encoder = tfk.Sequential([
-    tfkl.InputLayer(input_shape=input_shape),
-    tfkl.Dense(tfpl.MultivariateNormalTriL.params_size(encoded_size),
-               activation=None),
-    tfpl.MultivariateNormalTriL(
-        encoded_size,
-        activity_regularizer=tfpl.KLDivergenceRegularizer(prior)),
-])
+
+def encoder(in_config,encoded_size,paramsize):
     
+    '''
+    Collect inputs, embed categorical inputs and concatenate all to get features
+    '''
+    l_in=[]
+    l_feat=[]
+    
+    for k in in_config.keys():
+        if k=='num':
+            in_num=tfk.Input(shape=(in_config.get(k).get('dim'),),dtype=tf.float32,name=in_config.get(k).get('id'))
+            l_in.append(in_num)
+            l_feat.append(in_num)
+        
+        if k=='cat':
+            for cv in in_config.get(k):
+                in_cat=tfk.Input(shape=(1,),dtype=tf.int32)
+                emb_cat=tfkl.Flatten()(tfkl.Embedding(cv.get('mod'),cv.get('emb'))(in_cat))
+                
+                l_in.append(in_cat)
+                l_feat.append(emb_cat)
+                
+    
+    if len(l_feat)>1:       
+        in_feat=tfkl.Concatenate()(l_feat)
+        
+    elif len(l_feat)==1:
+        in_feat=l_feat[0]
+        
+    else:
+        raise BaseException('ModelSpecificationError: check input data configuration')
+    
+    '''
+    Map features to latent space, using a fully connected neural network
+    '''
+    
+    latent_params=tfkl.Dense(units=paramsize,activation=None)(in_feat)
+    
+    return tfk.Model(l_in,latent_params)
+
+def code_generator(encoded_size,prior,latent_params):    
+    out_code=tfpl.MultivariateNormalTriL(
+        encoded_size,
+        activity_regularizer=tfpl.KLDivergenceRegularizer(prior))(latent_params)
+    return(out_code)
 
 '''
 Decoder network
 '''
+def decoder(in_config,code):
+    '''
+    Map latent variables to output features:
+        - Shared layers: among all outputs
+        - Specific layers: used to map individual tasks to their outputs
+    '''
+    logit=tfkl.Dense(units=input_shape)(code)
 
-decoder = tfk.Sequential([
-    tfkl.InputLayer(input_shape=[encoded_size]),
-    tfkl.Dense(tfpl.MultivariateNormalTriL.params_size(encoded_size),
-               activation=None),
-    tfpl.IndependentBernoulli(input_shape, tfd.Bernoulli.logits),
-])
+    
+    return logit
   
 
 '''
 Full model
 '''
-    
-vae = tfk.Model(inputs=encoder.inputs,
-                outputs=decoder(encoder.outputs[0]))
+
+in_config={'num':{'id':'num','dim':3,'act':'relu'},'cat':[{'id':'cat1','mod':5,'emb':2},{'id':'cat2','mod':7,'emb':4}]}
+paramsize=tfpl.MultivariateNormalTriL.params_size(encoded_size)
+encoder_net=encoder(in_config,encoded_size,paramsize)
+
+recogn_net=tfk.Model(encoder_net.inputs,code_generator(encoded_size,prior,encoder_net.output))
+ 
+vae = tfk.Model(inputs=recogn_net.inputs,
+                outputs=decoder(input_shape,recogn_net.output))
+
+vae.summary() 
+
+'''
+Visualize architecture
+'''
+tfkv.plot_model(vae)
+vae.summary()
 
 
 negloglik = lambda x, rv_x: -rv_x.log_prob(x)
