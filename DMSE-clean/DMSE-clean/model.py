@@ -47,7 +47,7 @@ class MODEL:
 		#tf.summary.scalar("min-cov", tf.reduce_min(self.sigma))
 		#tf.summary.histogram("1D-covariance", tf.reshape(self.sigma,[-1]))
 
-		#self.sqrt_diag=1.0/tf.sqrt(tf.diag_part(self.sigma))
+		#self.sqrt_diag=1.0/tf.sqrt(tf.diag_part(self.sigma)) 
 		self.covariance=self.sigma + tf.eye(r_dim)
 		#tf.summary.histogram("correlation", tf.reshape(self.correlation,[-1]))
 		############## Sample_r ###############

@@ -125,7 +125,7 @@ def fc_nn(name,archi,reg=None):
     activs=archi.get("activation")
     if type(activs)!=list:
         activs=[activs]*archi.get("nl") ##same activation everywhere
-        raise Warning('Using the same activation for all layers.')
+        Warning('Using the same activation for all layers.')
     
     ### Whether to dropout inputs: useful in case of images ###    
     if reg.get('dropout') is not None:
@@ -179,6 +179,8 @@ def mtl_output(shared_config,out_configs,model_name="mtl"):
         if act=='probit':
             act=probit
             act_='probit'
+            
+        act_=act
             
         t_pred=tfkl.Activation(activation=act,name=tnm+"_"+act_)(tc_fc(shared.output))
         
@@ -299,34 +301,33 @@ def conditional_variational_autoencoder(in_feat,in_config,fe_config,encoder_conf
     return encoder_net, decoder_net, tfk.Model(l_in_E,prior), cvar_autoencoder
     
     
-    
 
 """
 Unit test
 
 """
 
-def u_cvae():
-    in_feat=[('num',{'id':'env','dim':13})]
-    in_config=[('num',{'id':'taxa','dim':86})]
+# def u_cvae():
+#     in_feat=[('num',{'id':'env','dim':13})]
+#     in_config=[('num',{'id':'taxa','dim':86})]
     
-    fe_config={'name':'fe','archi':{'nbnum':13,'nl':1,'nn':[5],'activation':'relu'},'reg':None}
-    
-    
-    encoder_config={'name':'encoder','archi':{'nbnum':86,'nl':1,'nn':[16],'activation':'relu'},'reg':None}
-    decoder_config={'name':'shared_decoder','archi':{'nbnum':16+13,'nl':0,'nn':[],'activation':'relu'},'reg':None}
+#     fe_config={'name':'fe','archi':{'nbnum':13,'nl':1,'nn':[5],'activation':'relu'},'reg':None}
     
     
-    taxa={'name':'specific_decoder','archi':{'nbnum':16+13,'nl':1,'nn':[86],'activation':'relu'},'reg':None}
+#     encoder_config={'name':'encoder','archi':{'nbnum':86,'nl':1,'nn':[16],'activation':'relu'},'reg':None}
+#     decoder_config={'name':'shared_decoder','archi':{'nbnum':16+13,'nl':0,'nn':[],'activation':'relu'},'reg':None}
     
-    out_config=[ {'name':'t','type':'binary','specific':taxa,'activation':'probit'}]    
     
-    e, d, p, cvae=conditional_variational_autoencoder(in_feat,in_config,fe_config,encoder_config,decoder_config,out_config)
+#     taxa={'name':'specific_decoder','archi':{'nbnum':16+13,'nl':1,'nn':[86],'activation':'relu'},'reg':None}
     
-    tfkv.plot_model(e)
-    tfkv.plot_model(d)
-    tfkv.plot_model(p)
-    tfkv.plot_model(cvae)
+#     out_config=[ {'name':'t','type':'binary','specific':taxa,'activation':'probit'}]    
+    
+#     e, d, p, cvae=conditional_variational_autoencoder(in_feat,in_config,fe_config,encoder_config,decoder_config,out_config)
+    
+#     tfkv.plot_model(e)
+#     tfkv.plot_model(d)
+#     tfkv.plot_model(p)
+#     tfkv.plot_model(cvae)
     
 
 """
