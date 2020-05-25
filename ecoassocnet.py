@@ -8,6 +8,7 @@ Created on Sun Apr 12 15:59:42 2020
 
 from lego_blocks import *
 from eval_functions import *
+from NB import NB
 import numpy as np
 
  
@@ -35,6 +36,23 @@ class TaxaEmbedding(tfkl.Layer):
     def compute_output_shape(self):
        return self.output_dim
 
+class GlobalParam(tfkl.Layer):
+
+    def __init__(self, output_dim,vname, **kwargs):
+       self.output_dim = output_dim
+       self.vname=vname
+       super(GlobalParam, self).__init__(**kwargs)
+
+    def build(self, input_shapes):
+       self.kernel = tf.Variable(tf.random_uniform_initializer(minval=-1,maxval=1)(shape=[1,self.output_dim],dtype=tf.float32),
+                                 name=self.vname, 
+                                 trainable=True)
+       
+       super(GlobalParam, self).build(input_shapes)  
+
+    def call(self, inputs):
+       return inputs
+    
 class AssociationEmbedding(tfkl.Layer):
     def __init__(self, output_dim,sym,reg,mask, **kwargs):       
        ## Get dimension
@@ -45,7 +63,6 @@ class AssociationEmbedding(tfkl.Layer):
        if mask:
            self.mask-=tf.eye(self.output_dim)
        self.assoc_reg=tfkr.l1_l2(l1=reg[0],l2=reg[1])
-       #self.var_assoc=var_assoc
 
        super(AssociationEmbedding, self).__init__(**kwargs)
 
@@ -63,8 +80,6 @@ class AssociationEmbedding(tfkl.Layer):
        ### Add regularization constraints over associations
        ## Sparsity inducing constraint
        self.add_loss(lambda: self.assoc_reg(self.assoc))
-       
-       ## Other constraints
        
        super(AssociationEmbedding, self).build(input_shape)  
 
@@ -103,7 +118,7 @@ class EcoAssocNet(object):
         x_abio=self.fe_env_net(self.env_feat)
         
         ## Here, replace following dense layer by another network that yields regression parameters given traits
-        abio_resp=tfkl.Dense(self.m,use_bias=self.im_config['fit_bias']=='intercept')(x_abio)
+        abio_resp=tfkl.Dense(self.m,use_bias=self.im_config['archi']['fit_bias']=='intercept')(x_abio)
         
         ## Generate biotic response
         if self.var_assoc:
@@ -116,15 +131,22 @@ class EcoAssocNet(object):
         
         ### Aggregate abiotic and biotic effects
         drivers=[abio_resp,bio_resp]
-        if self.im_config['fit_bias']=='offset':
+        if self.im_config['archi']['fit_bias']=='offset':
             drivers+=[tf.expand_dims(tf.constant(offsets,dtype=tf.float32),0)]
         
         ### aggregation is done using addition here, could be extended to more complex differentiable functions
         logits=tfkl.Add(name=self.model_name+'_out')(drivers)
-        pred=tfkl.Activation(act_fn.get(self.dist[0]))(logits)
         
+        ### Add dispersion parameter to trainable weights (the unconstrained version)
+        if self.dist[0] in ['negbin']:
+            self.disp=GlobalParam(self.m,'disp')
+            logits=self.disp(logits)
+            self.nbr=NB(theta_var=self.disp.kernel)
+            
+
+        pred=tfkl.Activation(act_fn.get(self.dist[0]))(logits)
         self.eta_model=tfk.Model(self.inputs,logits) 
-        self.pred_model=tfk.Model(self.inputs,pred)
+        self.pred_model=tfk.Model(self.inputs,pred)            
     
     def gen_covs(self):
         self.inputs=[]
@@ -149,12 +171,14 @@ class EcoAssocNet(object):
         self.association=AssociationEmbedding(self.m,self.im_config['sym'],self.shared_config['reg'],True)
         
     
-    def compile_model(self,on_logit=False,opt='adagrad',mets=[]):
+    def compile_model(self,on_logit=False,opt='adamax',mets=[]):
         self.on_logit=on_logit
         
         if self.dist[1] is not None:
             loss=loss_fn.get(self.dist[0])(self.dist[1])
             
+        elif self.dist[0] in ['negbin']:
+            loss=self.nbr.loss
         else:
             loss=loss_fn.get(self.dist[0])
             
@@ -165,20 +189,18 @@ class EcoAssocNet(object):
             self.pred_model.compile(optimizer=opt,loss=loss,metrics=mets)
             
     
-    def fit_model(self,trainset,validset,train_config,cbk,vb):
+    def fit_model(self,trainset,validset,train_config,vb,cbk=[]):
+        cbk+=[tfk.callbacks.EarlyStopping(
+            monitor=train_config['objective'],min_delta=train_config['tol'],patience=train_config['patience'],mode=train_config['mode'])]
+        
         self.pred_model.fit(x=[trainset['x'],trainset['y']],y=trainset['y'],
-                            validation_data=([validset['x'],validset['y']],validset['y']),
-                            batch_size=train_config['bsize'],epochs=train_config['epoch'],
+                            validation_data=validset,
+                            batch_size=train_config['bsize'],epochs=train_config['max_iter'],
                             callbacks=cbk,verbose=vb)
         
         
-
+        
 '''
-TODO: 
-    1. Add support for gaussian distribution
-    2. Add support for negative binomial distribution
-    3. Add support for multinomial and dirichlet distribution
-    4. Add convergence check with tol and max_iter
-    5. Add model selection with loglikelihood, BIC, eBIC, stars, bootstrap
+    Add model selection with loglikelihood, BIC, eBIC, stars, bootstrap
 '''        
         

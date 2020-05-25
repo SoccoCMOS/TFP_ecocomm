@@ -35,6 +35,16 @@ def gammaln(x):
     xp3 = 3.0 + x
     return -2.081061466 - x + 0.0833333 / xp3 - logterm + (2.5 + x) * tfm.log (xp3)
 
+def logsumexp(self, vec1, vec2):
+    flag = tf.greater(vec1, vec2)
+    maxv = tf.where(flag, vec1, vec2)
+    lse = tf.log(tf.exp(vec1 - maxv) + tf.exp(vec2 - maxv)) + maxv
+    return lse
+
+def inv_softplus_np(self, x):
+    y = np.log(np.exp(x) - 1)
+    return y 
+
 ########################################################################################################
 '''
             Cross-entropy derivatives and advanced loss functions         
@@ -74,16 +84,17 @@ def bce(bw=None,lw=None,avg=False):
 
 
 def negbin_loss(y_true,y_pred):   ###uses y_pred as log probability or logit or applies softplus=relu to it beforehand
-    r=y_pred[0]
-    p=y_pred[1]
+    r=y_pred[1]
+    p=y_pred[0]
+    y_true=tf.cast(y_true,tf.float32)
     logprob = gammaln(y_true + r) - gammaln(y_true + 1.0) -  \
                  gammaln(r) + r * tfm.log(r) + \
-                 y_true * tfm.log(p+1E-6) - (r + y_true) * tfm.log(r + p)
+                 y_true * tfm.log(p+eps) - (r + y_true) * tfm.log(r + p)
 
-    return tfk.backend.mean(logprob, axis=-1)
+    return tfm.reduce_mean(logprob)
 
 #### Loss functions selector ####
-loss_fn={'normal':tfk.losses.mean_squared_error,
+loss_fn={'normal':tfk.losses.mean_squared_error, ##assumes that outputs are scaled (sd=1)
         'poisson2':tfk.losses.poisson,
         'poisson':tfk.losses.poisson,
         'binomial':tfk.losses.binary_crossentropy,

@@ -42,28 +42,36 @@ d=6
 m=1000
 p=5
 c=0
+n=64
 
-shared_config={'latent_dim':d,'pool_size':m,'reg':(0.5,0.5),'dist':('poisson',None)}
+shared_config={'latent_dim':d,'pool_size':m,'reg':(0.,0.0),'dist':('negbin',None)}
 hsm_config={'input':[('num',{'id':'num1','dim':p})],'reg':None,'archi':{'nbnum':p,'nl':0,'nn':[],'activation':'relu','fit_bias':False}}
 im_config={'input':[],'sym':True,'reg':None,'reg':None,
             'archi':{'nbnum':c,'nl':1,'nn':[d],'activation':'relu','fit_bias':False}}
 
 
-train_config={'bsize':512,'epoch':200}
+train_config={'bsize':512,'max_iter':200,
+              'tol':1E-3,'patience':5,
+              'mode':'min','objective':'loss'}
 
+
+### Generate data to test fitting ###
+x=np.random.normal(0,1,(n,p))
+y_true=np.random.poisson(1,(n,m))
 
 ea=EcoAssocNet(model_name="randomtest",shared_config=shared_config,hsm_config=hsm_config,im_config=im_config)
 ea.create_architecture() 
-ea.compile_model()  
 tfkv.plot_model(ea.pred_model,show_shapes=True)
+ea.compile_model()  
+y_pred=ea.pred_model.predict([x,y_true])
 
-### Generate data to test fitting ###
-n=100000
-X=np.random.normal(0,1,(n,p))
-y=np.random.poisson(1,(n,m))
+print('Initial loss %.3f' % ea.nbr.loss(y_true, y_pred))
+
+w_init=ea.pred_model.get_weights()
+r_init=ea.nbr.theta_variable.numpy()
 
 cbk=[tfk.callbacks.TensorBoard(write_graph=False,
-                                embeddings_layer_names=['association_embedding/taxa_embedding/latent_0'],
+                                #embeddings_layer_names=['association_embedding/taxa_embedding/latent_0'],
                                 update_freq='epoch',
                                 write_images=False,
                                 histogram_freq=5)]
@@ -71,9 +79,12 @@ cbk=[tfk.callbacks.TensorBoard(write_graph=False,
                                 
 import time
 start_time = time.time()
-ea.fit_model({'x':X,'y':y},None,train_config,[])
+ea.fit_model({'x':x,'y':y_true},None,train_config,2,[])
 print("--- %s seconds ---" % (time.time() - start_time))
 
+## Checking updates of dispersion parameter
+w_last=ea.pred_model.get_weights()
+r_last=ea.nbr.theta_variable.numpy()
 
 # w=ea.pred_model.get_weights()
 # wa=ea.association.get_weights()

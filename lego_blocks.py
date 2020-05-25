@@ -59,13 +59,11 @@ def probit(x):
 
 #### Activation functions selector ####
 act_fn={'normal':tfk.activations.linear,
-        'poisson2':tfk.activations.exponential,
-        'poisson':tfk.activations.relu,
+        'poisson':tfk.activations.exponential,
         'binomial':tfk.activations.sigmoid,
         'binomial2':probit,
         'categorical':tfk.activations.softmax,
-        'negbin':tfk.activations.relu,
-        'negbin2':tfk.activations.exponential
+        'negbin':tfk.activations.exponential
         }
 
 """
