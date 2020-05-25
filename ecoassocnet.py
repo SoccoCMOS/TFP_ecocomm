@@ -8,7 +8,6 @@ Created on Sun Apr 12 15:59:42 2020
 
 from lego_blocks import *
 from eval_functions import *
-import tensorflow_addons as tfa
 import numpy as np
 
  
@@ -83,59 +82,6 @@ class AssociationEmbedding(tfkl.Layer):
        return tf.constant([input_shape[0],self.output_dim,self.output_dim])
 
 
-def gammaln(x):
-    # fast approximate gammaln from paul mineiro
-    # http://www.machinedlearnings.com/2011/06/faster-lda.html
-    logterm = tfm.log (x * (1.0 + x) * (2.0 + x))
-    xp3 = 3.0 + x
-    return -2.081061466 - x + 0.0833333 / xp3 - logterm + (2.5 + x) * tfm.log (xp3)
-
-
-def negbin_loss(y_true,y_pred):   ###uses y_pred as log probability or logit or applies softplus=relu to it beforehand
-    r=y_pred[0]
-    p=y_pred[1]
-    logprob = gammaln(y_true + r) - gammaln(y_true + 1.0) -  \
-                 gammaln(r) + r * tfm.log(r) + \
-                 y_true * tfm.log(p+1E-6) - (r + y_true) * tfm.log(r + p)
-
-    return tfk.backend.mean(logprob, axis=-1)
-
-
-#### Activations ####
-act_fn={'normal':tfk.activations.linear,
-        'poisson2':tfk.activations.exponential,
-        'poisson':tfk.activations.relu,
-        'binomial':tfk.activations.sigmoid,
-        'binomial2':probit,
-        'categorical':tfk.activations.softmax,
-        'negbin':tfk.activations.relu,
-        'negbin2':tfk.activations.exponential
-        }
-
-#### Loss functions ####
-loss_fn={'normal':tfk.losses.mean_squared_error,
-        'poisson2':tfk.losses.poisson,
-        'poisson':tfk.losses.poisson,
-        'binomial':tfk.losses.binary_crossentropy,
-        'binomial2':tfk.losses.binary_crossentropy,
-        'categorical':tfk.losses.categorical_crossentropy,
-        'negbin':negbin_loss,
-        'negbin2':negbin_loss
-        }
-
-metric_fn={
-    'regression':[tfa.metrics.RSquare()],
-    'classification':[tfkm.BinaryAccuracy(),tfkm.AUC(),
-                      tfkm.Precision(),tfkm.Recall(),#tss
-                      tfkm.PrecisionAtRecall(recall=0.5),
-                      tfkm.SensitivityAtSpecificity(specificity=0.5),
-                      tfkm.TruePositives(),tfkm.FalsePositives(),
-                      tfkm.TrueNegatives(),tfkm.FalseNegatives()],
-    'mclassification':[tfkm.CategoricalAccuracy()],
-    'count':[tfkm.MeanSquaredError(),#tfkm.MeanAbsolutePercentageError(),
-             tfkm.MeanAbsoluteError(),poisson_dev]
-    }
-
 class EcoAssocNet(object):
     def __init__(self,model_name="model",shared_config=None,hsm_config=None,im_config=None):
         self.model_name=model_name
@@ -173,6 +119,7 @@ class EcoAssocNet(object):
         if self.im_config['fit_bias']=='offset':
             drivers+=[tf.expand_dims(tf.constant(offsets,dtype=tf.float32),0)]
         
+        ### aggregation is done using addition here, could be extended to more complex differentiable functions
         logits=tfkl.Add(name=self.model_name+'_out')(drivers)
         pred=tfkl.Activation(act_fn.get(self.dist[0]))(logits)
         

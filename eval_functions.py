@@ -10,10 +10,10 @@ This script contains specific loss functions and metrics for some supported comp
 
 import numpy as np
 import tensorflow as tf
+import tensorflow_addons as tfa
 import sklearn.metrics as skm
 import matplotlib.pyplot as plt
 import itertools
-from tensorflow.python.ops import math_ops, nn_ops, array_ops
 
 tfk=tf.keras
 tfm=tf.math
@@ -21,6 +21,25 @@ tfkm=tfk.metrics
 K=tfk.backend
 
 eps=1E-6
+
+
+########################################################################################################
+'''
+            Utilities and fast approximations        
+''' 
+########################################################################################################
+def gammaln(x):
+    # fast approximate gammaln from paul mineiro
+    # http://www.machinedlearnings.com/2011/06/faster-lda.html
+    logterm = tfm.log (x * (1.0 + x) * (2.0 + x))
+    xp3 = 3.0 + x
+    return -2.081061466 - x + 0.0833333 / xp3 - logterm + (2.5 + x) * tfm.log (xp3)
+
+########################################################################################################
+'''
+            Cross-entropy derivatives and advanced loss functions         
+''' 
+########################################################################################################
 
 def stable_focal_loss(gamma=2, alpha=np.ones((3,1))):  
     def focal_loss(y_true, y_pred):#with tensorflow
@@ -54,6 +73,32 @@ def bce(bw=None,lw=None,avg=False):
     return bce_weighted
 
 
+def negbin_loss(y_true,y_pred):   ###uses y_pred as log probability or logit or applies softplus=relu to it beforehand
+    r=y_pred[0]
+    p=y_pred[1]
+    logprob = gammaln(y_true + r) - gammaln(y_true + 1.0) -  \
+                 gammaln(r) + r * tfm.log(r) + \
+                 y_true * tfm.log(p+1E-6) - (r + y_true) * tfm.log(r + p)
+
+    return tfk.backend.mean(logprob, axis=-1)
+
+#### Loss functions selector ####
+loss_fn={'normal':tfk.losses.mean_squared_error,
+        'poisson2':tfk.losses.poisson,
+        'poisson':tfk.losses.poisson,
+        'binomial':tfk.losses.binary_crossentropy,
+        'binomial2':tfk.losses.binary_crossentropy,
+        'categorical':tfk.losses.categorical_crossentropy,
+        'negbin':negbin_loss,
+        'negbin2':negbin_loss
+        }
+
+########################################################################################################
+'''
+                    Custom metrics for exponential family outputs        
+''' 
+########################################################################################################
+
 def poisson_dev(y_true, y_pred):
     ### Adapted from Ron Richman's https://github.com/RonRichman/AI_in_Actuarial_Science/blob/master/poisson_dev.py
     K=tfk.backend
@@ -62,19 +107,27 @@ def poisson_dev(y_true, y_pred):
     return 2*K.mean(y_pred - y_true -y_true*(K.log(K.clip(y_pred,K.epsilon(),None)) -K.log(K.clip(y_true,K.epsilon(),None))),axis=-1)  
 
 
-def tss(y_true,y_pred):
-    tp=tfkm.TruePositives()(y_true,y_pred)
-    tn=tfkm.TrueNegatives()(y_true,y_pred)
-    fp=tfkm.FalsePositives()(y_true,y_pred)
-    fn=tfkm.FalseNegatives()(y_true,y_pred)
-    
-    spec=tn/(tn+fp)
-    sens=tp/(tp+fn)
-    
-    return spec+sens-1
-
+## Metric functions selector ##
+metric_fn={
+    'regression':[tfa.metrics.RSquare()],
+    'classification':[tfkm.BinaryAccuracy(),tfkm.AUC(),
+                      tfkm.Precision(),tfkm.Recall(),#tss
+                      tfkm.PrecisionAtRecall(recall=0.5),
+                      tfkm.SensitivityAtSpecificity(specificity=0.5),
+                      tfkm.TruePositives(),tfkm.FalsePositives(),
+                      tfkm.TrueNegatives(),tfkm.FalseNegatives()],
+    'mclassification':[tfkm.CategoricalAccuracy()],
+    'count':[tfkm.MeanSquaredError(),#tfkm.MeanAbsolutePercentageError(),
+             tfkm.MeanAbsoluteError(),poisson_dev]
+    }
 
 ########################################################################################################
+'''
+            Classification metrics for multi-label problems
+                        Operates on numpy objects            
+''' 
+########################################################################################################
+
     
 def eval_task(y_true,y_pred,taxa=None,th=0.5,prevs=None):  ### provide inputs as np array
     ### Returns a long dataframe with pairs (dataset, taxa, metric)
