@@ -18,17 +18,24 @@ Each function has the following parameters:
 """
 Dependencies: tensorflow 2.1, Keras (tf.keras), Tensorflow probability
 """
+import os
+
 import tensorflow as tf
 import tensorflow_probability as tfp
 
 
-tfk = tf.keras
-tfkl = tf.keras.layers
+tfm=tf.math
+
 tfpl = tfp.layers
 tfd = tfp.distributions
+tfb=tfp.bijectors
+
+tfk = tf.keras
+tfkl = tf.keras.layers
 tfkv= tfk.utils
 tfkr=tfk.regularizers
 tfki=tfk.initializers
+tfkm=tf.keras.metrics
 
 """
 Utility functions
@@ -80,7 +87,7 @@ def custom_input(in_config,concat_feat=True,model_name="model"):
             for cv in v[1]:
                 in_cat=tfk.Input(shape=(1,),dtype=tf.int32,name=cv.get('id'))
                 emb_cat=tfkl.Flatten()(
-                    tfkl.Embedding(cv.get('mod'),cv.get('emb'),name=cv.get('id')+"_emb")(in_cat))
+                    tfkl.Embedding(cv.get('mod'),cv.get('emb'),name=cv.get('id')+"_emb",embeddings_regularizer=tfk.regularizers.l2(0.001))(in_cat))
                 
                 l_in.append(in_cat)
                 l_feat.append(emb_cat)
@@ -119,7 +126,7 @@ def fc_nn(name,archi,reg=None):
         reg={'regtype':None,'regparam':None}
         
     kreg=get_regularizer(reg.get("regtype"),reg.get("regparam"))
-    
+
     prev=in_num
     
     activs=archi.get("activation")
@@ -134,7 +141,7 @@ def fc_nn(name,archi,reg=None):
                 prev=tfkl.Dropout(rate)(prev)
     
     for i in range(archi.get("nl")):
-        prev=tfkl.Dense(archi.get("nn")[i], activation=activs[i],name=name+"_"+str(i),kernel_regularizer=kreg)(prev)
+        prev=tfkl.Dense(archi.get("nn")[i], use_bias=archi.get("fit_bias"),activation=activs[i],name=name+"_"+str(i),kernel_regularizer=kreg)(prev)
         if reg.get('dropout') is not None:
             rate=reg.get("dropout")[i+1]
             if rate<1:
@@ -149,18 +156,24 @@ def fc_nn(name,archi,reg=None):
 '''
 Heterogeneous outputs
 '''
-def mtl_output(shared_config,out_configs,model_name="mtl"):
+def mtl_output(shared_config,out_configs,model_name="mtl",path='',plot=False,concat=False):
     
     ### Shared feature transformation component
     shared=fc_nn(name=shared_config['name'],archi=shared_config['archi'],reg=shared_config['reg'])
     l_outputs=[]
-
+    
+    if plot:
+        os.makedirs(path+model_name, exist_ok=True)
+        tfkv.plot_model(shared,path+model_name+'/shared.png',show_shapes=True)
     
     ### Task-specific components
     for tc in out_configs:  ##out_config is a list of configs for each output {'type':'cat','specific':{'archi','reg'}}
         tnm=tc['name']
         specific_config=tc['specific']
         tc_fc=fc_nn(tnm,specific_config['archi'],reg=specific_config['reg'])
+        
+        if plot:
+            tfkv.plot_model(tc_fc,path+model_name+'/%s.png'%tnm,show_shapes=True)
         
         act=tc['activation']
         if act is None: ##specify default value
@@ -185,8 +198,19 @@ def mtl_output(shared_config,out_configs,model_name="mtl"):
         t_pred=tfkl.Activation(activation=act,name=tnm+"_"+act_)(tc_fc(shared.output))
         
         l_outputs.append(t_pred)
+        
     
-    return tfk.Model(shared.inputs,l_outputs,name=model_name)
+    if concat:
+        if len(l_outputs)>1:
+            out=tfkl.Concatenate()(l_outputs)
+        
+        else:
+            out=l_outputs[0]
+    
+    else:
+        out=l_outputs
+    
+    return tfk.Model(shared.inputs,out,name=model_name)
    
 
 """

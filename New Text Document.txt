@@ -1,0 +1,6 @@
+for /l %x in (0, 1, 4) do (
+   echo %x current iteration
+   for /l %y in (2, 1, 9) do (
+       python lombrics_eval.py --cpt=%x --rank=%y --ep=100
+   )
+)
