@@ -16,16 +16,28 @@ seed=1234
 tf.random.set_seed(seed)
 
 
+def compute_density(mat,th=0.01):
+    return np.sum(np.abs(mat)>=th)/(mat.shape[0]*mat.shape[1])
+
+def compute_effective_dimension(resp,eff,eps=1E-4):
+    rdimuse=(np.max(np.abs(resp),axis=0)>eps)
+    edimuse=(np.max(np.abs(eff),axis=0)>eps)
+    return np.sum(rdimuse | edimuse)
+                
+
 class TaxaEmbedding(tfkl.Layer):
-    def __init__(self, output_dim,name, **kwargs):
+    def __init__(self, output_dim,name,norm, **kwargs):
        super(TaxaEmbedding, self).__init__(**kwargs)
        self.output_dim = output_dim
        self.vname=name
+       self.norm=norm
 
     def build(self, input_shapes):
        self.kernel = self.add_weight(name=self.vname, 
                                      shape=self.output_dim, 
                                      initializer='uniform', 
+                                     #regularizer=l1,
+                                     constraint=tfk.constraints.UnitNorm(axis=1) if self.norm else None,
                                      trainable=True)       
        
        super(TaxaEmbedding, self).build(input_shapes)  
@@ -63,6 +75,9 @@ class AssociationEmbedding(tfkl.Layer):
        if mask:
            self.mask-=tf.eye(self.output_dim)
        self.assoc_reg=tfkr.l1_l2(l1=reg[0],l2=reg[1])
+       
+       self.reg_emb=reg[2] if len(reg)>2 else True
+       self.norm=reg[3] if len(reg)>3 else True 
 
        super(AssociationEmbedding, self).__init__(**kwargs)
 
@@ -70,22 +85,24 @@ class AssociationEmbedding(tfkl.Layer):
        ## Parameters are embeddings of response and effect
        emb_dim=tf.constant([self.output_dim,input_shape[2]])
        if self.is_symmetric:
-           self.eff_emb=self.resp_emb=TaxaEmbedding(emb_dim,'latent')(None)
+           self.eff_emb=self.resp_emb=TaxaEmbedding(emb_dim,'latent',self.norm)(None)
        else:
-           self.eff_emb=TaxaEmbedding(emb_dim,'effect')(None)
-           self.resp_emb=TaxaEmbedding(emb_dim,'response')(None)
-       
-       self.assoc=tfk.backend.dot(self.resp_emb,tf.transpose(self.eff_emb))
+           self.eff_emb=TaxaEmbedding(emb_dim,'effect',self.norm)(None)
+           self.resp_emb=TaxaEmbedding(emb_dim,'response',self.norm)(None)
        
        ### Add regularization constraints over associations
        ## Sparsity inducing constraint
-       self.add_loss(lambda: self.assoc_reg(self.assoc))
+       if self.reg_emb:
+           self.add_loss(lambda: self.assoc_reg(self.resp_emb)+self.assoc_reg(self.eff_emb))
+       else:
+           self.add_loss(lambda: self.assoc_reg(tf.tensordot(self.resp_emb,self.eff_emb,axes=[1,1])))
        
        super(AssociationEmbedding, self).build(input_shape)  
 
     def call(self, loadings):  
         ### inputs has dimension [n,1,d] for shared loadings or [n,m,d] for specific loadings per species
         ## alpha=[m,d], input=[n,1,d]   => [n,m,d]
+
         loaded_effect=tf.multiply(loadings,self.eff_emb)
         
         ## associations : [n,m,d] x [m,d] => [n,m,m]
@@ -110,7 +127,7 @@ class EcoAssocNet(object):
         
         self.dist=shared_config['dist']
         
-    def create_architecture(self,offsets=None):
+    def create_architecture(self,offsets=None,mode='add'):
         ## generate abiotic and biotic covariates
         self.gen_covs()
         
@@ -127,6 +144,7 @@ class EcoAssocNet(object):
             x_bio=tfkl.Lambda(lambda x: tf.ones((tf.shape(x)[0],1,self.d)),name=self.model_name+'_loadings')(abio_resp)
         
         assoc=self.association(x_bio)
+        
         bio_resp=tfkl.Dot(axes=1)([self.counts,assoc])
         
         ### Aggregate abiotic and biotic effects
@@ -135,18 +153,24 @@ class EcoAssocNet(object):
             drivers+=[tf.expand_dims(tf.constant(offsets,dtype=tf.float32),0)]
         
         ### aggregation is done using addition here, could be extended to more complex differentiable functions
-        logits=tfkl.Add(name=self.model_name+'_out')(drivers)
-        
-        ### Add dispersion parameter to trainable weights (the unconstrained version)
-        if self.dist[0] in ['negbin']:
-            self.disp=GlobalParam(self.m,'disp')
-            logits=self.disp(logits)
-            self.nbr=NB(theta_var=self.disp.kernel)
+        if (self.dist[0]=='binomial') & (mode=='bam'):
+            pred=tfkl.Activation('sigmoid')(abio_resp)*tfkl.Activation('sigmoid')(bio_resp)
+            self.eta_model=None            
+        else:
+            logits=tfkl.Add(name=self.model_name+'_out')(drivers)   
             
-
-        pred=tfkl.Activation(act_fn.get(self.dist[0]))(logits)
-        self.eta_model=tfk.Model(self.inputs,logits) 
-        self.pred_model=tfk.Model(self.inputs,pred)            
+            if self.dist[0] in ['negbin']:
+                self.disp=GlobalParam(self.m,'disp')
+                logits=self.disp(logits)
+                self.nbr=NB(theta_var=self.disp.kernel)
+                
+            pred=tfkl.Activation(act_fn.get(self.dist[0]))(logits)
+            self.eta_model=tfk.Model(self.inputs,logits) 
+            
+        self.pred_model=tfk.Model(self.inputs,pred)
+        
+        if self.var_assoc:
+            self.assoc_model=tfk.Model(self.bio_in,assoc)
     
     def gen_covs(self):
         self.inputs=[]
@@ -190,17 +214,70 @@ class EcoAssocNet(object):
             
     
     def fit_model(self,trainset,validset,train_config,vb,cbk=[]):
-        cbk+=[tfk.callbacks.EarlyStopping(
-            monitor=train_config['objective'],min_delta=train_config['tol'],patience=train_config['patience'],mode=train_config['mode'])]
+        # cbk+=[tfk.callbacks.EarlyStopping(
+        #     monitor=train_config['objective'],min_delta=train_config['tol'],patience=train_config['patience'],mode=train_config['mode'])]
         
         self.pred_model.fit(x=[trainset['x'],trainset['y']],y=trainset['y'],
                             validation_data=validset,
                             batch_size=train_config['bsize'],epochs=train_config['max_iter'],
                             callbacks=cbk,verbose=vb)
         
+    
+    def evaluate_model(self,trainset):
+        perfs=self.pred_model.evaluate(x=[trainset['x'],trainset['y']],y=trainset['y'])
+        
+        ## Get loglikelihood 
+        ll=(perfs[0]-self.pred_model.losses[1]).numpy()
+        
+        ## Compute information criterion 
+        k=self.get_parameter_size()
+        n=trainset['y'].shape[0]*trainset['y'].shape[1]
+        
+        ## AIC
+        aic=2*ll + 2*k
+        aicc=aic + (2*k*k+2*k)/(n-k-1)
+        bic=2*ll + k*np.log(n)
+        
+        mets=['obj']+self.pred_model.metrics_names
+        perfs={mets[k]:perfs[k] for k in range(len(perfs))}
+        perfs['loss']=ll
+        perfs['aic']=aic
+        perfs['aicc']=aicc
+        perfs['bic']=bic
+        return perfs
+    
+    def get_parameter_size(self):
+        d=compute_effective_dimension(self.get_embeddings()['response'],self.get_embeddings()['effect'])
+        w = self.fe_env_net.count_params()
+        
+        return d*self.m + w
+    
+        
+    def get_embeddings(self):
+        eff=self.association.eff_emb.numpy()
+        resp=self.association.resp_emb.numpy()
+        
+        return {"response":resp,"effect":eff}
+    
+    def get_network(self):
+        return np.dot(self.association.resp_emb.numpy(),self.association.eff_emb.numpy().T)*(1-np.eye(self.m)) 
+    
+    def get_abiotic_response(self):
+        return self.fe_env_net.get_weights()
+    
+    def get_biotic_loadings(self):
+        return self.fe_bio_net.get_weights()
+    
+    def predict_network(self,X_bio):
+        if self.var_assoc:
+            return self.assoc_model(X_bio)
+        else:
+            return self.get_network()
+        
+    
+    def save_model(self,file):
+        self.pred_model.save_weights(file)
         
         
-'''
-    Add model selection with loglikelihood, BIC, eBIC, stars, bootstrap
-'''        
+        
         

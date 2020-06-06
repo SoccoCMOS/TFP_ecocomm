@@ -134,6 +134,9 @@ def fc_nn(name,archi,reg=None):
     if reg is None:
         reg={'regtype':None,'regparam':None}
         
+    if type(reg)==tuple:
+        reg={'regtype':'l1_l2','regparam':reg}
+        
     kreg=get_regularizer(reg.get("regtype"),reg.get("regparam"))
 
     prev=in_num
