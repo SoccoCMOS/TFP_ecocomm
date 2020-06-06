@@ -1,5 +1,0 @@
--Select best configuration of hyperparameters and best model based on BIC or AIC/AICc
--Evaluate inferred associations against ground truth
--Fit to previous simulations
--Summarize results of HMSC+PLN+EA 
-(HMSC with covariance and with inverse covariance => indirect effects)
