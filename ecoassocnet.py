@@ -10,6 +10,7 @@ from lego_blocks import *
 from eval_functions import *
 from NB import NB
 import numpy as np
+from scipy.special import logit
 
  
 seed=1234
@@ -26,47 +27,43 @@ def compute_effective_dimension(resp,eff,eps=1E-4):
                 
 
 class TaxaEmbedding(tfkl.Layer):
-    def __init__(self, output_dim,name,norm, **kwargs):
+    def __init__(self, output_dim,name,norm,groups, **kwargs):
        super(TaxaEmbedding, self).__init__(**kwargs)
        self.output_dim = output_dim
        self.vname=name
        self.norm=norm
+       ## The following sets the species groups for embedding sharing
+       ## If provided by the user these are used otherwise each species is considered
+       ## As a sole group 
+       self.groups=groups
+       self.ng=len(np.unique(self.groups))
 
     def build(self, input_shapes):
+       if self.norm=='unit':
+           print('Adding unit norm constraints')
+           emb_const=tfk.constraints.UnitNorm(axis=1)
+       elif self.norm=='nneg':
+           print('Adding non negative constraints')
+           emb_const=tfk.constraints.NonNeg()
+       else:
+           emb_const=None
        self.kernel = self.add_weight(name=self.vname, 
-                                     shape=self.output_dim, 
+                                     shape=[self.ng,self.output_dim[1]], 
                                      initializer='uniform', 
                                      #regularizer=l1,
-                                     constraint=tfk.constraints.UnitNorm(axis=1) if self.norm else None,
+                                     constraint= emb_const,
                                      trainable=True)       
        
        super(TaxaEmbedding, self).build(input_shapes)  
 
     def call(self, inputs):
        return self.kernel
-
+       
     def compute_output_shape(self):
        return self.output_dim
-
-class GlobalParam(tfkl.Layer):
-
-    def __init__(self, output_dim,vname, **kwargs):
-       self.output_dim = output_dim
-       self.vname=vname
-       super(GlobalParam, self).__init__(**kwargs)
-
-    def build(self, input_shapes):
-       self.kernel = tf.Variable(tf.random_uniform_initializer(minval=-1,maxval=1)(shape=[1,self.output_dim],dtype=tf.float32),
-                                 name=self.vname, 
-                                 trainable=True)
-       
-       super(GlobalParam, self).build(input_shapes)  
-
-    def call(self, inputs):
-       return inputs
     
 class AssociationEmbedding(tfkl.Layer):
-    def __init__(self, output_dim,sym,reg,mask, **kwargs):       
+    def __init__(self, output_dim=None,sym=True,reg=None,mask=True,groups=None, **kwargs):       
        ## Get dimension
        self.output_dim = output_dim
        self.is_symmetric=sym
@@ -74,27 +71,35 @@ class AssociationEmbedding(tfkl.Layer):
        self.mask=tf.ones((self.output_dim,self.output_dim))
        if mask:
            self.mask-=tf.eye(self.output_dim)
-       self.assoc_reg=tfkr.l1_l2(l1=reg[0],l2=reg[1])
+           
+       if (reg[0]>0) & (reg[1]>0):
+           self.assoc_reg=tfkr.l1_l2(l1=reg[0],l2=reg[1])
+       else:
+           self.assoc_reg=None
        
        self.reg_emb=reg[2] if len(reg)>2 else True
-       self.norm=reg[3] if len(reg)>3 else True 
+       self.norm=reg[3] if len(reg)>3 else None 
+       
+       self.groups=np.arange(output_dim) if groups is None else np.array(groups)
+       self.prior=groups is not None
 
        super(AssociationEmbedding, self).__init__(**kwargs)
 
     def build(self, input_shape):
        ## Parameters are embeddings of response and effect
-       emb_dim=tf.constant([self.output_dim,input_shape[2]])
+       emb_dim=tf.constant([self.output_dim,input_shape[2]])  ## m  x  d
        if self.is_symmetric:
-           self.eff_emb=self.resp_emb=TaxaEmbedding(emb_dim,'latent',self.norm)(None)
+           self.eff_emb=self.resp_emb=TaxaEmbedding(emb_dim,'latent',self.norm,self.groups)(None)
        else:
-           self.eff_emb=TaxaEmbedding(emb_dim,'effect',self.norm)(None)
-           self.resp_emb=TaxaEmbedding(emb_dim,'response',self.norm)(None)
+           self.eff_emb=TaxaEmbedding(emb_dim,'effect',self.norm,self.groups)(None)
+           self.resp_emb=TaxaEmbedding(emb_dim,'response',self.norm,self.groups)(None)
        
        ### Add regularization constraints over associations
        ## Sparsity inducing constraint
        if self.reg_emb:
            self.add_loss(lambda: self.assoc_reg(self.resp_emb)+self.assoc_reg(self.eff_emb))
-       else:
+           
+       elif self.assoc_reg is not None:
            self.add_loss(lambda: self.assoc_reg(tf.tensordot(self.resp_emb,self.eff_emb,axes=[1,1])))
        
        super(AssociationEmbedding, self).build(input_shape)  
@@ -102,11 +107,17 @@ class AssociationEmbedding(tfkl.Layer):
     def call(self, loadings):  
         ### inputs has dimension [n,1,d] for shared loadings or [n,m,d] for specific loadings per species
         ## alpha=[m,d], input=[n,1,d]   => [n,m,d]
-
-        loaded_effect=tf.multiply(loadings,self.eff_emb)
+        if self.prior:
+            alpha=tf.gather(params=self.eff_emb,indices=self.groups,axis=0)
+            rho=tf.gather(params=self.resp_emb,indices=self.groups,axis=0)
+        else:
+            alpha=self.eff_emb
+            rho=self.resp_emb
+            
+        loaded_effect=tf.multiply(loadings,alpha)
         
         ## associations : [n,m,d] x [m,d] => [n,m,m]
-        local_assoc=tfk.backend.dot(loaded_effect,tf.transpose(self.resp_emb))
+        local_assoc=tfk.backend.dot(loaded_effect,tf.transpose(rho))
 
         return tf.multiply(local_assoc,self.mask)
 
@@ -115,7 +126,7 @@ class AssociationEmbedding(tfkl.Layer):
 
 
 class EcoAssocNet(object):
-    def __init__(self,model_name="model",shared_config=None,hsm_config=None,im_config=None):
+    def __init__(self,model_name="model",groups=None,shared_config=None,hsm_config=None,im_config=None):
         self.model_name=model_name
         self.hsm_config=hsm_config
         self.im_config=im_config
@@ -126,8 +137,9 @@ class EcoAssocNet(object):
         self.var_assoc=(len(self.im_config['input'])>0)
         
         self.dist=shared_config['dist']
+        self.groups=groups
         
-    def create_architecture(self,offsets=None,mode='add'):
+    def create_architecture(self,offsets=None,mode='add',in_proba=False):
         ## generate abiotic and biotic covariates
         self.gen_covs()
         
@@ -135,7 +147,11 @@ class EcoAssocNet(object):
         x_abio=self.fe_env_net(self.env_feat)
         
         ## Here, replace following dense layer by another network that yields regression parameters given traits
-        abio_resp=tfkl.Dense(self.m,use_bias=self.im_config['archi']['fit_bias']=='intercept')(x_abio)
+        if in_proba:
+            print('HSM proba given')
+            abio_resp=x_abio
+        else:
+            abio_resp=tfkl.Dense(self.m,use_bias=self.hsm_config['archi']['fit_bias'])(x_abio)
         
         ## Generate biotic response
         if self.var_assoc:
@@ -143,19 +159,20 @@ class EcoAssocNet(object):
         else:
             x_bio=tfkl.Lambda(lambda x: tf.ones((tf.shape(x)[0],1,self.d)),name=self.model_name+'_loadings')(abio_resp)
         
-        assoc=self.association(x_bio)
-        
+        assoc=self.association(x_bio)        
         bio_resp=tfkl.Dot(axes=1)([self.counts,assoc])
         
         ### Aggregate abiotic and biotic effects
         drivers=[abio_resp,bio_resp]
-        if self.im_config['archi']['fit_bias']=='offset':
-            drivers+=[tf.expand_dims(tf.constant(offsets,dtype=tf.float32),0)]
+        # if self.im_config['archi']['fit_bias']=='offset':
+        #     drivers+=[tf.expand_dims(tf.constant(offsets,dtype=tf.float32),0)]
         
         ### aggregation is done using addition here, could be extended to more complex differentiable functions
         if (self.dist[0]=='binomial') & (mode=='bam'):
-            pred=tfkl.Activation('sigmoid')(abio_resp)*tfkl.Activation('sigmoid')(bio_resp)
-            self.eta_model=None            
+            ## Add an intercept (useful for basal species)
+            off_bio_resp=BiasLayer(name=self.model_name+'_indep_offset')(bio_resp)
+            pred=tfkl.Activation('sigmoid')(abio_resp)*tfkl.Activation('sigmoid')(off_bio_resp)
+            self.eta_model=tfk.Model(self.inputs,[abio_resp,off_bio_resp])            
         else:
             logits=tfkl.Add(name=self.model_name+'_out')(drivers)   
             
@@ -168,6 +185,7 @@ class EcoAssocNet(object):
             self.eta_model=tfk.Model(self.inputs,logits) 
             
         self.pred_model=tfk.Model(self.inputs,pred)
+        self.hsm_model=tfk.Model(self.env_in,abio_resp)
         
         if self.var_assoc:
             self.assoc_model=tfk.Model(self.bio_in,assoc)
@@ -192,7 +210,7 @@ class EcoAssocNet(object):
                               archi=self.im_config['archi'],
                               reg=im_config['reg'])
             
-        self.association=AssociationEmbedding(self.m,self.im_config['sym'],self.shared_config['reg'],True)
+        self.association=AssociationEmbedding(self.m,self.im_config['sym'],self.shared_config['reg'],True,self.groups)
         
     
     def compile_model(self,on_logit=False,opt='adamax',mets=[]):
@@ -216,18 +234,33 @@ class EcoAssocNet(object):
     def fit_model(self,trainset,validset,train_config,vb,cbk=[]):
         # cbk+=[tfk.callbacks.EarlyStopping(
         #     monitor=train_config['objective'],min_delta=train_config['tol'],patience=train_config['patience'],mode=train_config['mode'])]
-        
         self.pred_model.fit(x=[trainset['x'],trainset['y']],y=trainset['y'],
                             validation_data=validset,
                             batch_size=train_config['bsize'],epochs=train_config['max_iter'],
+                            validation_split=0.1,
                             callbacks=cbk,verbose=vb)
         
-    
+    def set_hsm_weights(self,init_hsm=None):
+        init_=[init_hsm[:,1:].T,init_hsm[:,0]]
+        self.hsm_model.set_weights(init_)
+        
+        
+    def predict(self,X,Yc=None):  
+        ##predicts given other species are absent in case of binary classif
+        ##or given mean abundances of other species in case of count 
+        if Yc is None:
+            Yc=np.zeros((X.shape[0],self.m))
+        y_pred=self.pred_model.predict(x=[X,Yc])
+        
+        return y_pred
+        
     def evaluate_model(self,trainset):
         perfs=self.pred_model.evaluate(x=[trainset['x'],trainset['y']],y=trainset['y'])
         
         ## Get loglikelihood 
-        ll=(perfs[0]-self.pred_model.losses[1]).numpy()
+        ll=perfs[0]
+        if len(self.pred_model.losses)>1:
+            ll=(ll-self.pred_model.losses[1]).numpy()
         
         ## Compute information criterion 
         k=self.get_parameter_size()
@@ -260,7 +293,14 @@ class EcoAssocNet(object):
         return {"response":resp,"effect":eff}
     
     def get_network(self):
-        return np.dot(self.association.resp_emb.numpy(),self.association.eff_emb.numpy().T)*(1-np.eye(self.m)) 
+        resp=self.association.resp_emb.numpy()
+        eff=self.association.eff_emb.numpy()
+        # if self.groups is not None:
+        #     rho=resp[self.groups,:]
+        #     alpha=eff[self.groups,:]
+        
+        return np.dot(resp,eff.T)*(1-np.eye(resp.shape[0])) 
+        
     
     def get_abiotic_response(self):
         return self.fe_env_net.get_weights()

@@ -73,6 +73,7 @@ def stable_focal_loss(gamma=2, alpha=np.ones((3,1))):
 
 
 def bce(bw=None,lw=None,avg=False):
+    print('Binary cross entropy with class/label weights')
     def bce_weighted(y_true,y_pred):
       # Compute cross entropy from probabilities.
       y_true=tf.cast(y_true,tf.float32)
@@ -97,7 +98,7 @@ def negbin_loss(y_true,y_pred):   ###uses y_pred as log probability or logit or 
 loss_fn={'normal':tfk.losses.mean_squared_error, ##assumes that outputs are scaled (sd=1)
         'poisson2':tfk.losses.poisson,
         'poisson':tfk.losses.poisson,
-        'binomial':tfk.losses.binary_crossentropy,
+        'binomial':lambda w: bce(bw=w[0],lw=w[1],avg=True) if w is None else tfk.losses.binary_crossentropy,
         'binomial2':tfk.losses.binary_crossentropy,
         'categorical':tfk.losses.categorical_crossentropy,
         'negbin':negbin_loss,

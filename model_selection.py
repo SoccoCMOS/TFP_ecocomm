@@ -23,6 +23,7 @@ import json
 from sklearn.model_selection import GridSearchCV, KFold
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 skl=tfk.wrappers.scikit_learn
+from scipy.special import expit
 
 ####
 '''
@@ -33,31 +34,31 @@ for instantiating an estimator object given a configuration of hyperparameters
 ####
 
 def generate_grid(dist,p,m,c=0,sym=True,d_range=None,l_range_hsm=[0.,0.001,0.01,0.1],l_range_ass=[0.,0.001,0.01,0.1],l_range_im=[0.,0.001,0.01,0.1],
-                  l_reg=[False],l_norm=[False],out_mode='add',
+                  l_reg=[False],l_norm=[None],out_mode='add',groups=None,in_proba=False,
                   bs=64,max_it=200,tol=1E-6,patience=5,mode='min',obj='loss'):
-    pb='classification' if dist in ['binomial','binomial2'] else 'mclassification' if dist in ['categorical'] else 'regression' if dist in ['normal'] else 'count'
+    pb='classification' if dist[0] in ['binomial','binomial2'] else 'mclassification' if dist[0] in ['categorical'] else 'regression' if dist[0] in ['normal'] else 'count'
     
     param_combi={
         'd':np.arange(2,m) if d_range is None else d_range,
         'pen':[(l,0.,reg,norm) for l in l_range_ass for reg in l_reg for norm in l_norm],
-        'opt':['adam','adamax'],
-        'fit_bias_hsm':[True],'act_hsm':['relu'],'nn_hsm':[[m]],'reg_hsm':[(0.,l) for l in l_range_hsm],
-        'fit_bias_im':[False],'act_im':['relu'],'nn_im':[[]],'reg_im':[(0.,l) for l in l_range_im],
+        'opt':['adam'],
+        'fit_bias_hsm':[True],'act_hsm':['relu'],'nn_hsm':[[m]],'reg_hsm':[l for l in l_range_hsm],
+        'fit_bias_im':[False],'act_im':['relu'],'nn_im':[[]],'reg_im':[l for l in l_range_im],
         }
     
     param_grid=[]
     for d, pen, opt, fit_bias_hsm, act_hsm, nn_hsm, reg_hsm, fit_bias_im,act_im,nn_im,reg_im in itertools.product(
             np.arange(2,m) if d_range is None else d_range,
             [(l,0.,reg,norm) for l in l_range_ass for reg in l_reg for norm in l_norm],
-            ['adam','adamax'],
+            ['adam'],
             [True],
             ['relu'],
-            [[m]],
-            [(0.,l) for l in l_range_hsm],
+            [[]],
+            [l for l in l_range_hsm],
             [False],
             ['relu'],
             [[]],
-            [(0.,l) for l in l_range_im]):
+            [l for l in l_range_im]):
         conf={
         'd':d,
         'pen':pen,
@@ -70,15 +71,15 @@ def generate_grid(dist,p,m,c=0,sym=True,d_range=None,l_range_hsm=[0.,0.001,0.01,
         param_grid.append(conf)
     
     def create_model(name="model",d=2,pen=(0.,0.0),opt='adamax',
-                     fit_bias_hsm=True,act_hsm='relu',nn_hsm=[m],reg_hsm=(0.,0.001),
-                     fit_bias_im=False,act_im='relu',nn_im=[],reg_im=(0.,0.001)
+                     fit_bias_hsm=True,act_hsm='relu',nn_hsm=[m],reg_hsm=(0.,0.),
+                     fit_bias_im='intercept',act_im='relu',nn_im=[],reg_im=(0.,0.)
                      ):   
         
         
         regwh={'regtype':'l1_l2','regparam':reg_hsm,'dropout':None}
         regwi={'regtype':'l1_l2','regparam':reg_im,'dropout':None}
         
-        shared_config={'latent_dim':d,'pool_size':m,'reg':pen,'dist':(dist,None)}
+        shared_config={'latent_dim':d,'pool_size':m,'reg':pen,'dist':dist}
         hsm_config={'input':[('num',{'id':'num1','dim':p})],'reg':reg_hsm,'archi':{'nbnum':p,'nl':len(nn_hsm),'nn':nn_hsm,'activation':act_hsm,'fit_bias':fit_bias_hsm}}
         im_config={'input':[],'sym':sym,'reg':reg_im,
                     'archi':{'nbnum':c,'nl':len(nn_im),'nn':nn_im,'activation':act_im,'fit_bias':fit_bias_im}}
@@ -88,8 +89,8 @@ def generate_grid(dist,p,m,c=0,sym=True,d_range=None,l_range_hsm=[0.,0.001,0.01,
                       'tol':tol,'patience':patience,
                       'mode':mode,'objective':obj}
         
-        ea=EcoAssocNet(model_name=name,shared_config=shared_config,hsm_config=hsm_config,im_config=im_config)
-        ea.create_architecture(mode=out_mode) 
+        ea=EcoAssocNet(model_name=name,groups=groups,shared_config=shared_config,hsm_config=hsm_config,im_config=im_config)
+        ea.create_architecture(mode=out_mode,in_proba=in_proba) 
         ea.compile_model(opt=opt,mets=metric_fn.get(pb))
         return ea, train_config
     
@@ -100,7 +101,7 @@ def generate_grid(dist,p,m,c=0,sym=True,d_range=None,l_range_hsm=[0.,0.001,0.01,
 ##########################################
 
 class EAModelSelection(object):
-    def __init__(self,data,dist,sym,classif,mode='add'):
+    def __init__(self,data,dist,sym,classif,mode='add',groups=None,in_proba=False):
         self.hsm_covariates=data[0]
         self.targets=data[1]
         self.im_covariates=data[2]
@@ -112,11 +113,13 @@ class EAModelSelection(object):
         self.sym=sym
         self.dist=dist
         self.mode=mode
+        self.groups=groups
+        self.in_proba=in_proba
         
         ## Replace the following wrapper with custom estimator
         #self.estimator=EcoAssocNetClassifier if classif else EcoAssocNetRegressor
     
-    def generate_grid(self,d_range=None,l_reg=[False],l_norm=[False],l_range_hsm=None,l_range_im=None,l_range_ass=None,max_it=10):
+    def generate_grid(self,d_range=None,l_reg=[False],l_norm=[None],l_range_hsm=None,l_range_im=None,l_range_ass=None,max_it=10):
         if l_range_ass is None:
             l_range_ass=[0.,0.001,0.01,0.1]
             
@@ -133,15 +136,19 @@ class EAModelSelection(object):
         self.l_reg=l_reg
         self.l_norm=l_norm
         
-        self.create_model, self.param_grid=generate_grid(self.dist,self.p,self.m,self.c,out_mode=self.mode,sym=self.sym,l_reg=self.l_reg,l_norm=self.l_norm,d_range=d_range,l_range_hsm=self.l_range_hsm,l_range_im=self.l_range_im,l_range_ass=self.l_range_ass,max_it=max_it)
+        self.create_model, self.param_grid=generate_grid(self.dist,self.p,self.m,self.c,out_mode=self.mode,in_proba=self.in_proba,groups=self.groups,sym=self.sym,l_reg=self.l_reg,l_norm=self.l_norm,d_range=d_range,l_range_hsm=self.l_range_hsm,l_range_im=self.l_range_im,l_range_ass=self.l_range_ass,max_it=max_it)
         self.path=None
     
-    def information_model_selection(self,save=True,plot_network=False,file='weights',cbks=[]):
+    def information_model_selection(self,save=True,plot_network=False,plot_hsm=None,
+                                    file='weights',init_weights=None,cbks=[]):
         scores=[]
   
         for cpt in range(len(self.param_grid)):
             conf=self.param_grid[cpt]
             ea_obj, train_config=self.create_model(**conf)
+            
+            if init_weights is not None:
+                ea_obj.set_hsm_weights(init_weights)
             
             trainset={'x':self.hsm_covariates,'y':self.targets}
             ea_obj.fit_model(trainset,None,train_config,vb=1,cbk=cbks)
@@ -150,10 +157,14 @@ class EAModelSelection(object):
             net=ea_obj.get_network()
             for k in perfs.keys():
                 conf[k]=perfs.get(k)
-                        
+                
+            scores.append(conf)
+            
+            ## Save weights ##                        
             if save:
                 ea_obj.save_model('%sweights_%d.h5'%(file,cpt))
             
+            ## Plot network ##
             if plot_network:
                 fig, ax=plt.subplots(1,1)
                 sns.heatmap(net,cmap='seismic',vmin=-1,vmax=1,ax=ax)
@@ -163,8 +174,38 @@ class EAModelSelection(object):
                 
                 plt.close()
                 
-            scores.append(conf)
-            
+            if plot_hsm is not None:
+                xdata=plot_hsm[0]
+                xlab=plot_hsm[1]
+                ytrue=plot_hsm[2]
+                ylab=plot_hsm[3]
+                ypred=ea_obj.predict(X=xdata,Yc=ytrue)
+                yhsm=expit(ea_obj.hsm_model.predict(xdata))
+                
+                m=len(ylab)
+                nrow, ncol=plot_hsm[4]
+                fig, ax=plt.subplots(nrow,ncol,figsize=(20,20))
+                nb=0
+                for i in range(nrow):
+                    for j in range(ncol):
+                        sns.lineplot(x=xlab,y=ypred[:,nb],ax=ax[i,j])
+                        sns.scatterplot(x=xlab,y=ytrue[:,nb],ax=ax[i,j])
+                        nb+=1
+                
+                fig.savefig(plot_hsm[5]+'pred_'+str(cpt)+'.pdf',bbox_inches='tight')
+                plt.close()
+                
+                fig, ax=plt.subplots(nrow,ncol,figsize=(20,20))
+                nb=0
+                for i in range(nrow):
+                    for j in range(ncol):
+                        sns.lineplot(x=xlab,y=yhsm[:,nb],ax=ax[i,j])
+                        sns.scatterplot(x=xlab,y=ytrue[:,nb],ax=ax[i,j])
+                        nb+=1
+                
+                fig.savefig(plot_hsm[5]+'hsm_'+str(cpt)+'.pdf',bbox_inches='tight')
+                plt.close()
+      
         return scores
             
     def stars_network(self,beta=0.05,eps=1E-4,th=1E-2,reg_emb=True,cpt=0,conf=None,N=10,norm_emb=True):

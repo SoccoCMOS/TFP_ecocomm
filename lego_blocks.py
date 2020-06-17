@@ -335,4 +335,33 @@ def conditional_variational_autoencoder(in_feat,in_config,fe_config,encoder_conf
     cvar_autoencoder=tfk.Model(l_in+l_in_E,l_out)
     
     return encoder_net, decoder_net, tfk.Model(l_in_E,prior), cvar_autoencoder
-    
+
+class GlobalParam(tfkl.Layer):
+
+    def __init__(self, output_dim,vname, **kwargs):
+       self.output_dim = output_dim
+       self.vname=vname
+       super(GlobalParam, self).__init__(**kwargs)
+
+    def build(self, input_shapes):
+       self.kernel = tf.Variable(tf.random_uniform_initializer(minval=-1,maxval=1)(shape=[1,self.output_dim],dtype=tf.float32),
+                                 name=self.vname, 
+                                 trainable=True)
+       
+       super(GlobalParam, self).build(input_shapes)  
+
+    def call(self, inputs):
+       return inputs
+
+
+class BiasLayer(tfkl.Layer):
+    def __init__(self, *args, **kwargs):
+        super(BiasLayer, self).__init__(*args, **kwargs)
+
+    def build(self, input_shape):
+        self.bias = self.add_weight('bias',
+                                    shape=input_shape[1:],
+                                    initializer='uniform',
+                                    trainable=True)
+    def call(self, x):
+        return x + self.bias    
