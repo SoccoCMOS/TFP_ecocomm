@@ -14,13 +14,14 @@ Select best combination of hyperparameters based on:
     - StARS
 '''
 
+import timeit
 import seaborn as sns
 import matplotlib.pyplot as plt
 import pandas as pd
 from ecoassocnet import *
 import random
 import json
-from sklearn.model_selection import GridSearchCV, KFold
+from sklearn.model_selection import GridSearchCV, KFold, StratifiedKFold
 from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 skl=tfk.wrappers.scikit_learn
 from scipy.special import expit
@@ -101,7 +102,7 @@ def generate_grid(dist,p,m,c=0,sym=True,d_range=None,l_range_hsm=[0.,0.001,0.01,
 ##########################################
 
 class EAModelSelection(object):
-    def __init__(self,data,dist,sym,classif,mode='add',groups=None,in_proba=False):
+    def __init__(self,data,dist,sym,classif,mode='add',name='msel',groups=None,in_proba=False,bootstrap=1,rs=1):
         self.hsm_covariates=data[0]
         self.targets=data[1]
         self.im_covariates=data[2]
@@ -115,6 +116,9 @@ class EAModelSelection(object):
         self.mode=mode
         self.groups=groups
         self.in_proba=in_proba
+        
+        if bootstrap>1:
+            self.bootstrap=self.bootstrap_dataset(name=name,nsamples=bootstrap,rs=rs)
         
         ## Replace the following wrapper with custom estimator
         #self.estimator=EcoAssocNetClassifier if classif else EcoAssocNetRegressor
@@ -153,6 +157,7 @@ class EAModelSelection(object):
             trainset={'x':self.hsm_covariates,'y':self.targets}
             ea_obj.fit_model(trainset,None,train_config,vb=1,cbk=cbks)
             perfs=ea_obj.evaluate_model(trainset)
+            
             
             net=ea_obj.get_network()
             for k in perfs.keys():
@@ -307,21 +312,52 @@ class EAModelSelection(object):
             
             
             
-    def grid_search_cv(self,cv=5,njobs=-1,rep=1):
+    def grid_search_cv(self,cv=5,rep=1,vb=0,cbks=[],init_weights=None):
+        
         ##
         # Selects best architecture based on best average performance on cross-validation 
         ##
-        grid_result=[]
-        folds=KFold(n_splits=cv).split(self.hsm_covariates,self.targets)
-        #for X_train, X_test, y_train, y_test in folds:
-            
-        #grid = GridSearchCV(estimator=self.wrapper, param_grid=self.param_grid, n_jobs=njobs, cv=cv)
-        #grid_result = grid.fit(self.covariates, self.targets)
+        scores=[]
+        for repi in range(rep):
+            print('Repetition %d out of %d'%(repi,rep))
+            folds=KFold(n_splits=cv).split(self.hsm_covariates,(self.targets>0).astype(int))
+            f=0
+            for idx_train, idx_test in folds:
+                print('Fold %d out of %d'%(f,cv))
+                f+=1
+                trainset={'x':self.hsm_covariates[idx_train,:],'y':self.targets[idx_train,:]}
+                testset={'x':self.hsm_covariates[idx_test,:],'y':self.targets[idx_test,:]}
+                
+                for cpt in range(len(self.param_grid)):
+                    print('Configuration %d out of %d'%(cpt,len(self.param_grid)))
+                    conf=self.param_grid[cpt].copy()
+                    ea_obj, train_config=self.create_model(**conf)
+                    
+                    if init_weights is not None:
+                        ea_obj.set_hsm_weights(init_weights)
+                    
+                    t0=timeit.timeit()
+                    ea_obj.fit_model(trainset,None,train_config,vb=vb,cbk=cbks)
+                    tf=timeit.timeit()
+                    perfs=ea_obj.evaluate_model(testset)
+                    
+                    #net=ea_obj.get_network()
+                    for k in perfs.keys():
+                        conf[k]=perfs.get(k)
+                    
+                    conf['fold']=f
+                    conf['repetition']=repi
+                    conf['time']=tf-t0
+                    scores.append(conf)  
         
-        return grid_result
+        ### Select per criteria ###
+                    
+        return scores
     
-    def bootstrap_dataset(self,name,X,y,conf,nsamples=100,rs=1):
-        bootstrap=[]
+    def bootstrap_dataset(self,name,nsamples=100,rs=1):
+        X=self.hsm_covariates
+        y=self.targets
+        self.bootstrap=[]
         for bs in range(nsamples):
             ea=self.create_model('%s_%d'%(name,bs),**conf)
             boot = resample(np.arange(X.shape[0]), replace=True, n_samples=len(X), random_state=rs)
@@ -329,8 +365,7 @@ class EAModelSelection(object):
             y_train=y[boot,:]
             
             perfs=ea.evaluate_model(X_train,y_train)
-            bootstrap.append((ea,perfs))
-        return bootstrap  
+            self.bootstrap.append((ea,perfs)) 
         
         
     

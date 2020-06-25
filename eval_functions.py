@@ -8,6 +8,7 @@ This script contains specific loss functions and metrics for some supported comp
 (See lego_blocks.py)
 """
 
+import pandas as pd
 import numpy as np
 import tensorflow as tf
 import tensorflow_addons as tfa
@@ -110,6 +111,12 @@ loss_fn={'normal':tfk.losses.mean_squared_error, ##assumes that outputs are scal
                     Custom metrics for exponential family outputs        
 ''' 
 ########################################################################################################
+
+def poly(x, p):
+    x = np.array(x)
+    X = np.transpose(np.vstack((x**k for k in range(p+1))))
+    return np.linalg.qr(X)[0][:,1:]
+
 
 def poisson_dev(y_true, y_pred):
     ### Adapted from Ron Richman's https://github.com/RonRichman/AI_in_Actuarial_Science/blob/master/poisson_dev.py

@@ -72,7 +72,7 @@ class AssociationEmbedding(tfkl.Layer):
        if mask:
            self.mask-=tf.eye(self.output_dim)
            
-       if (reg[0]>0) & (reg[1]>0):
+       if (reg[0]>0) | (reg[1]>0):
            self.assoc_reg=tfkr.l1_l2(l1=reg[0],l2=reg[1])
        else:
            self.assoc_reg=None
@@ -255,7 +255,7 @@ class EcoAssocNet(object):
         return y_pred
         
     def evaluate_model(self,trainset):
-        perfs=self.pred_model.evaluate(x=[trainset['x'],trainset['y']],y=trainset['y'])
+        perfs=self.pred_model.evaluate(x=[trainset['x'],trainset['y']],y=trainset['y'],verbose=0)
         
         ## Get loglikelihood 
         ll=perfs[0]
@@ -266,12 +266,12 @@ class EcoAssocNet(object):
         k=self.get_parameter_size()
         n=trainset['y'].shape[0]*trainset['y'].shape[1]
         
-        ## AIC
+        ## Information criteria
         aic=2*ll + 2*k
         aicc=aic + (2*k*k+2*k)/(n-k-1)
         bic=2*ll + k*np.log(n)
         
-        mets=['obj']+self.pred_model.metrics_names
+        mets=self.pred_model.metrics_names
         perfs={mets[k]:perfs[k] for k in range(len(perfs))}
         perfs['loss']=ll
         perfs['aic']=aic
